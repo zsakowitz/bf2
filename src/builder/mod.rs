@@ -1,4 +1,6 @@
 //! Defines an allocator which can build brainfuck programs.
 
+pub mod cell;
 pub mod core;
-pub mod u8;
+pub mod string;
+pub mod types;

@@ -1,6 +1,7 @@
 //! Defines a runner for brainfuck programs.
 
-use std::fmt;
+use crate::builder::types::CellValue;
+use std::fmt::{self, Write};
 
 /// A structure which can quickly run brainfuck programs.
 ///
@@ -9,16 +10,20 @@ use std::fmt;
 /// A runner may also be printed as LowerHex or UpperHex, in which case everything will appear
 /// identical to its Debug representation, but with hex strings instead of base-10 numerals for its
 /// data.
-pub struct Runner<const N: usize> {
-    memory: [u8; N],
+///
+/// The `N` const parameter is the size of the memory array, and the `T` type generic is the type of
+/// value stored inside. All integer values may be used, along with their `Wrapping` and
+/// `Saturating` variants.
+pub struct Runner<const N: usize, T: CellValue> {
+    memory: [T; N],
     pointer: usize,
-    input: Vec<u8>,
-    output: Vec<u8>,
+    input: Vec<T>,
+    output: Vec<T>,
 }
 
-impl<const N: usize> Runner<N> {
+impl<const N: usize, T: CellValue> Runner<N, T> {
     /// Constructs a new runner given some input.
-    pub fn new(input: &[u8]) -> Self {
+    pub fn new(input: &[T]) -> Self {
         if N == 0 {
             panic!("cannot create a runner of size zero");
         }
@@ -27,7 +32,7 @@ impl<const N: usize> Runner<N> {
         input.reverse();
 
         Self {
-            memory: [0; N],
+            memory: [T::ZERO; N],
             pointer: 0,
             input,
             output: Vec::new(),
@@ -37,13 +42,13 @@ impl<const N: usize> Runner<N> {
     #[inline]
     /// Increments the currently pointed at cell.
     pub fn inc(&mut self) {
-        self.memory[self.pointer] = self.memory[self.pointer].wrapping_add(1);
+        self.memory[self.pointer] = self.memory[self.pointer].inc();
     }
 
     #[inline]
     /// Decrements the currently pointed at cell.
     pub fn dec(&mut self) {
-        self.memory[self.pointer] = self.memory[self.pointer].wrapping_sub(1);
+        self.memory[self.pointer] = self.memory[self.pointer].dec();
     }
 
     #[inline]
@@ -61,7 +66,9 @@ impl<const N: usize> Runner<N> {
     #[inline]
     /// Reads a value from `self.input` into the current cell.
     pub fn read(&mut self) {
-        self.memory[self.pointer] = self.input.pop().unwrap_or(0);
+        if let Some(input) = self.input.pop() {
+            self.memory[self.pointer] = input;
+        }
     }
 
     #[inline]
@@ -73,203 +80,114 @@ impl<const N: usize> Runner<N> {
     #[inline]
     /// Repeats code while the currently pointed at cell is nonzero.
     pub fn repeat(&mut self, mut f: impl FnMut(&mut Self)) {
-        while self.memory[self.pointer] != 0 {
+        while self.memory[self.pointer] != T::ZERO {
             f(self);
         }
     }
 }
 
-struct RunnerData<'a>(&'a [u8], usize);
+struct RunnerData<'a, T: CellValue> {
+    data: &'a [T],
+    pointer: Option<usize>,
+    includes_start: bool,
+    includes_end: bool,
+}
 
-struct LowerHex<T>(T);
+struct VerbatimDebug(String);
 
-impl<T: fmt::LowerHex> fmt::Debug for LowerHex<T> {
+impl fmt::Debug for VerbatimDebug {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::LowerHex::fmt(&self.0, f)
+        f.write_str(&self.0)
     }
 }
 
-struct UpperHex<T>(T);
-
-impl<T: fmt::UpperHex> fmt::Debug for UpperHex<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::UpperHex::fmt(&self.0, f)
-    }
-}
-
-impl fmt::Debug for RunnerData<'_> {
+impl<T: CellValue + fmt::Debug> fmt::Debug for RunnerData<'_, T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}",
-            self.0
+        if !self.includes_start {
+            f.write_str("... ")?;
+        }
+
+        if self.data.len() == 0 {
+            f.write_str("(empty)")?;
+        }
+
+        for (index, value) in self.data.iter().enumerate() {
+            if index != 0 {
+                f.write_char(' ')?;
+            }
+
+            if Some(index) == self.pointer {
+                f.write_char('<')?;
+            }
+
+            value.fmt(f)?;
+
+            if Some(index) == self.pointer {
+                f.write_char('>')?;
+            }
+        }
+
+        if !self.includes_end {
+            f.write_str(" ...")?;
+        }
+
+        Ok(())
+    }
+}
+
+/// The number of values to show of memory away from where the pointer is located.
+const DEBUG_DATA_WIDTH: i32 = 8;
+
+impl<const N: usize, T: CellValue + Into<char> + fmt::Debug> fmt::Debug for Runner<N, T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let data = {
+            let start = 0i32.max(self.pointer as i32 - DEBUG_DATA_WIDTH) as usize;
+            let end = (N as i32).min(self.pointer as i32 + DEBUG_DATA_WIDTH) as usize;
+            let pointer = self.pointer - 0i32.max(self.pointer as i32 - DEBUG_DATA_WIDTH) as usize;
+
+            RunnerData {
+                data: &self.memory[start..end],
+                pointer: Some(pointer),
+                includes_start: start == 0,
+                includes_end: end == N,
+            }
+        };
+
+        if f.sign_minus() {
+            let input = RunnerData {
+                data: &self.input.iter().rev().copied().collect::<Vec<_>>(),
+                pointer: None,
+                includes_start: true,
+                includes_end: true,
+            };
+
+            let output = RunnerData {
+                data: &self.output.iter().copied().collect::<Vec<_>>(),
+                pointer: None,
+                includes_start: true,
+                includes_end: true,
+            };
+
+            f.debug_struct("Runner")
+                .field("data", &data)
+                .field("input", &input)
+                .field("output", &output)
+                .finish()
+        } else {
+            let input = self
+                .input
                 .iter()
-                .enumerate()
-                .map(|(i, v)| {
-                    let mut output = if i == self.1 {
-                        "<".to_string()
-                    } else {
-                        String::new()
-                    };
+                .rev()
+                .map(|x| (*x).into())
+                .collect::<String>();
 
-                    let mut value = v.to_string();
+            let output = self.output.iter().map(|x| (*x).into()).collect::<String>();
 
-                    if value.len() == 1 {
-                        value.insert(0, '0');
-                    }
-
-                    output += &value;
-
-                    if i == self.1 {
-                        output.push('>');
-                    }
-
-                    output
-                })
-                .collect::<Vec<_>>()
-                .join(" ")
-                .trim()
-        )
-    }
-}
-
-impl fmt::LowerHex for RunnerData<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}",
-            self.0
-                .iter()
-                .enumerate()
-                .map(|(i, v)| {
-                    let mut output = if i == self.1 {
-                        "<".to_string()
-                    } else {
-                        String::new()
-                    };
-
-                    output.push(
-                        "0123456789abcdef"
-                            .chars()
-                            .nth(*v as usize / 16)
-                            .expect("there will always be a character here"),
-                    );
-
-                    output.push(
-                        "0123456789abcdef"
-                            .chars()
-                            .nth(*v as usize % 16)
-                            .expect("there will always be a character here"),
-                    );
-
-                    if i == self.1 {
-                        output.push('>');
-                    }
-
-                    output
-                })
-                .collect::<Vec<_>>()
-                .join(" ")
-                .trim()
-        )
-    }
-}
-
-impl fmt::UpperHex for RunnerData<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}",
-            self.0
-                .iter()
-                .enumerate()
-                .map(|(i, v)| {
-                    let mut output = if i == self.1 {
-                        "<".to_string()
-                    } else {
-                        String::new()
-                    };
-
-                    output.push(
-                        "0123456789ABCDEF"
-                            .chars()
-                            .nth(*v as usize / 16)
-                            .expect("there will always be a character here"),
-                    );
-
-                    output.push(
-                        "0123456789ABCDEF"
-                            .chars()
-                            .nth(*v as usize % 16)
-                            .expect("there will always be a character here"),
-                    );
-
-                    if i == self.1 {
-                        output.push('>');
-                    }
-
-                    output
-                })
-                .collect::<Vec<_>>()
-                .join(" ")
-                .trim()
-        )
-    }
-}
-
-impl<const N: usize> fmt::Debug for Runner<N> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        const DEBUG_DATA_WIDTH: i32 = 8;
-
-        f.debug_struct("Runner")
-            .field(
-                "data",
-                &RunnerData(
-                    &self.memory[0i32.max(self.pointer as i32 - DEBUG_DATA_WIDTH) as usize
-                        ..(N as i32).min(self.pointer as i32 + DEBUG_DATA_WIDTH) as usize],
-                    self.pointer - 0i32.max(self.pointer as i32 - DEBUG_DATA_WIDTH) as usize,
-                ),
-            )
-            .field("input", &self.input.iter().rev().collect::<Vec<_>>())
-            .field("output", &self.output)
-            .finish()
-    }
-}
-
-impl<const N: usize> fmt::LowerHex for Runner<N> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        const DEBUG_DATA_WIDTH: i32 = 8;
-
-        f.debug_struct("Runner")
-            .field(
-                "data",
-                &LowerHex(RunnerData(
-                    &self.memory[0i32.max(self.pointer as i32 - DEBUG_DATA_WIDTH) as usize
-                        ..(N as i32).min(self.pointer as i32 + DEBUG_DATA_WIDTH) as usize],
-                    self.pointer - 0i32.max(self.pointer as i32 - DEBUG_DATA_WIDTH) as usize,
-                )),
-            )
-            .field("input", &self.input.iter().rev().collect::<Vec<_>>())
-            .field("output", &self.output)
-            .finish()
-    }
-}
-
-impl<const N: usize> fmt::UpperHex for Runner<N> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        const DEBUG_DATA_WIDTH: i32 = 8;
-
-        f.debug_struct("Runner")
-            .field(
-                "data",
-                &UpperHex(RunnerData(
-                    &self.memory[0i32.max(self.pointer as i32 - DEBUG_DATA_WIDTH) as usize
-                        ..(N as i32).min(self.pointer as i32 + DEBUG_DATA_WIDTH) as usize],
-                    self.pointer - 0i32.max(self.pointer as i32 - DEBUG_DATA_WIDTH) as usize,
-                )),
-            )
-            .field("input", &self.input.iter().rev().collect::<Vec<_>>())
-            .field("output", &self.output)
-            .finish()
+            f.debug_struct("Runner")
+                .field("data", &data)
+                .field("input", &input)
+                .field("output", &output)
+                .finish()
+        }
     }
 }
