@@ -1,9 +1,6 @@
 //! Defines a string which can be easily maniuplated for use in brainfuck programs.
 
-use super::{
-    core::{Builder, Cell},
-    types::CellValue,
-};
+use super::{cell::Cell, core::Builder, types::CellValue};
 use std::{
     fmt,
     ops::{AddAssign, Sub, SubAssign},

@@ -27,35 +27,7 @@ pub trait DebuggableCellValue: CellValue {
     fn into_char(self) -> char;
 }
 
-macro_rules! direct_cell_value_impl {
-    ($($x:ty)+) => {
-        $(
-            impl CellValue for $x {
-                const ZERO: Self = 0;
-                fn inc(self) -> Self { self + 1 }
-                fn dec(self) -> Self { self - 1 }
-                fn into_isize(self) -> isize { self.try_into().unwrap() }
-            }
-
-            impl DebuggableCellValue for $x {
-                fn into_char(self) -> char { self.into() }
-            }
-
-            impl CellValue for Wrapping<$x> {
-                const ZERO: Self = Wrapping(0);
-                fn inc(self) -> Self { self + Wrapping(1) }
-                fn dec(self) -> Self { self - Wrapping(1) }
-                fn into_isize(self) -> isize { self.0.try_into().unwrap() }
-            }
-
-            impl DebuggableCellValue for Wrapping<$x> {
-                fn into_char(self) -> char { self.0.into() }
-            }
-        )+
-    };
-}
-
-macro_rules! cell_value_impl {
+macro_rules! cell_value_impl_u {
     ($($x:ty)+) => {
         $(
             impl CellValue for $x {
@@ -83,5 +55,26 @@ macro_rules! cell_value_impl {
     };
 }
 
-direct_cell_value_impl! { u8 }
-cell_value_impl! { i8 u16 i16 u32 i32 u64 i64 u128 i128 usize isize }
+macro_rules! cell_value_impl_i {
+    ($($x:ty)+) => {
+        $(
+            impl CellValue for Wrapping<$x> {
+                const ZERO: Self = Wrapping(0);
+                fn inc(self) -> Self { self + Wrapping(1) }
+                fn dec(self) -> Self { self - Wrapping(1) }
+                fn into_isize(self) -> isize { self.0.try_into().unwrap() }
+            }
+
+            impl DebuggableCellValue for Wrapping<$x> {
+                fn into_char(self) -> char { u32::try_from(self.0).unwrap().try_into().unwrap() }
+            }
+        )+
+    };
+}
+
+cell_value_impl_u! { u8 u16 u32 u64 u128 }
+
+// Note that regular signed integers are intentionally unimplemented, because it would complicate
+// many of the existing algorithms. Only `Wrapping` variants of them are implemented.
+
+cell_value_impl_i! { i8 i16 i32 i64 i128 }
