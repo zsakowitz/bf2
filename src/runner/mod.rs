@@ -1,7 +1,14 @@
 //! Defines a runner for brainfuck programs.
 
-use crate::builder::types::CellValue;
-use std::fmt::{self, Write};
+pub mod output;
+
+use crate::builder::types::{CellValue, DebuggableCellValue};
+use std::{
+    fmt::{self, Write},
+    marker::PhantomData,
+};
+
+use self::output::{DebuggableRunnerOutput, RunnerOutput};
 
 /// A structure which can quickly run brainfuck programs.
 ///
@@ -14,28 +21,25 @@ use std::fmt::{self, Write};
 /// The `N` const parameter is the size of the memory array, and the `T` type generic is the type of
 /// value stored inside. All integer values may be used, along with their `Wrapping` and
 /// `Saturating` variants.
-pub struct Runner<const N: usize, T: CellValue> {
+pub struct Runner<const N: usize, I: Iterator<Item = T>, O: RunnerOutput<T>, T: CellValue> {
     memory: [T; N],
     pointer: usize,
-    input: Vec<T>,
-    output: Vec<T>,
+    input: I,
+    output: O,
 }
 
-impl<const N: usize, T: CellValue> Runner<N, T> {
+impl<const N: usize, I: Iterator<Item = T>, O: RunnerOutput<T>, T: CellValue> Runner<N, I, O, T> {
     /// Constructs a new runner given some input.
-    pub fn new(input: &[T]) -> Self {
+    pub fn new(input: I, output: O) -> Self {
         if N == 0 {
             panic!("cannot create a runner of size zero");
         }
-
-        let mut input = input.to_vec();
-        input.reverse();
 
         Self {
             memory: [T::ZERO; N],
             pointer: 0,
             input,
-            output: Vec::new(),
+            output,
         }
     }
 
@@ -64,9 +68,18 @@ impl<const N: usize, T: CellValue> Runner<N, T> {
     }
 
     #[inline]
-    /// Reads a value from `self.input` into the current cell.
+    /// Reads a value from `self.input` into the current cell, or leaves the cell's value as-is if
+    /// there is no input left. If you want to set the cell to a specific value after reading, there
+    /// are two options:
+    ///
+    /// 1. In a program, you can set the cell's value before reading input. For example, `[-],` will
+    ///    read a byte if there is one and set the cell to zero otherwise.
+    ///
+    /// 2. Add an extension to the iterator to ensures there are always cells to read. For example,
+    ///    `input.chain([0].iter().cycle())` will ensure that all cells are set to zero once there
+    ///    is no more memory left to read.
     pub fn read(&mut self) {
-        if let Some(input) = self.input.pop() {
+        if let Some(input) = self.input.next() {
             self.memory[self.pointer] = input;
         }
     }
@@ -74,7 +87,7 @@ impl<const N: usize, T: CellValue> Runner<N, T> {
     #[inline]
     /// Writes the current cell into `self.output`.
     pub fn write(&mut self) {
-        self.output.push(self.memory[self.pointer]);
+        self.output.write(self.memory[self.pointer]);
     }
 
     #[inline]
@@ -93,18 +106,10 @@ struct RunnerData<'a, T: CellValue> {
     includes_end: bool,
 }
 
-struct VerbatimDebug(String);
-
-impl fmt::Debug for VerbatimDebug {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
 impl<T: CellValue + fmt::Debug> fmt::Debug for RunnerData<'_, T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if !self.includes_start {
-            f.write_str("... ")?;
+            f.write_str(".. ")?;
         }
 
         if self.data.len() == 0 {
@@ -128,17 +133,52 @@ impl<T: CellValue + fmt::Debug> fmt::Debug for RunnerData<'_, T> {
         }
 
         if !self.includes_end {
-            f.write_str(" ...")?;
+            f.write_str(" ..")?;
         }
 
         Ok(())
     }
 }
 
+impl<T: CellValue + fmt::Debug> DebuggableRunnerOutput<T> for Vec<T> {
+    fn debug(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let data = RunnerData {
+            data: &self[..],
+            pointer: None,
+            includes_start: true,
+            includes_end: true,
+        };
+
+        fmt::Debug::fmt(&data, f)
+    }
+}
+
+struct RunnerOutputDebugWrapper<'a, T, I: DebuggableRunnerOutput<T>>(&'a I, PhantomData<T>);
+
+impl<'a, T, I: DebuggableRunnerOutput<T>> fmt::Debug for RunnerOutputDebugWrapper<'a, T, I> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.debug(f)
+    }
+}
+
+struct VerbatimDebug(String);
+
+impl fmt::Debug for VerbatimDebug {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// The number of values to show of memory away from where the pointer is located.
 const DEBUG_DATA_WIDTH: i32 = 8;
 
-impl<const N: usize, T: CellValue + Into<char> + fmt::Debug> fmt::Debug for Runner<N, T> {
+impl<
+        const N: usize,
+        I: Iterator<Item = T>,
+        O: RunnerOutput<T> + DebuggableRunnerOutput<T>,
+        T: DebuggableCellValue + fmt::Debug,
+    > fmt::Debug for Runner<N, I, O, T>
+{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let data = {
             let start = 0i32.max(self.pointer as i32 - DEBUG_DATA_WIDTH) as usize;
@@ -154,39 +194,22 @@ impl<const N: usize, T: CellValue + Into<char> + fmt::Debug> fmt::Debug for Runn
         };
 
         if f.sign_minus() {
-            let input = RunnerData {
-                data: &self.input.iter().rev().copied().collect::<Vec<_>>(),
-                pointer: None,
-                includes_start: true,
-                includes_end: true,
-            };
-
-            let output = RunnerData {
-                data: &self.output.iter().copied().collect::<Vec<_>>(),
-                pointer: None,
-                includes_start: true,
-                includes_end: true,
-            };
-
             f.debug_struct("Runner")
                 .field("data", &data)
-                .field("input", &input)
-                .field("output", &output)
+                .field("input", &VerbatimDebug("..".to_owned()))
+                .field(
+                    "output",
+                    &RunnerOutputDebugWrapper(&self.output, PhantomData),
+                )
                 .finish()
         } else {
-            let input = self
-                .input
-                .iter()
-                .rev()
-                .map(|x| (*x).into())
-                .collect::<String>();
-
-            let output = self.output.iter().map(|x| (*x).into()).collect::<String>();
-
             f.debug_struct("Runner")
                 .field("data", &data)
-                .field("input", &input)
-                .field("output", &output)
+                .field("input", &VerbatimDebug("..".to_owned()))
+                .field(
+                    "output",
+                    &RunnerOutputDebugWrapper(&self.output, PhantomData),
+                )
                 .finish()
         }
     }

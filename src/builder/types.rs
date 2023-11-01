@@ -1,6 +1,6 @@
 //! Defines traits that values can implement to allow storing them in brainfuck cells.
 
-use std::num::{Saturating, Wrapping};
+use std::num::Wrapping;
 
 /// A value that may be stored inside a brainfuck memory cell.
 pub trait CellValue: PartialEq + Copy {
@@ -13,9 +13,6 @@ pub trait CellValue: PartialEq + Copy {
     /// Decrements this value by one. Wrapping is undefined behavior unless in a `Wrapping<T>`.
     fn dec(self) -> Self;
 
-    // This could be a `(bool, usize)` pair, but there's not much point in returning a `usize`,
-    // especially after considering that strings cap at `usize::MAX` bytes.
-
     /// Converts this value into an isize.
     ///
     /// ## Panics
@@ -24,109 +21,67 @@ pub trait CellValue: PartialEq + Copy {
     fn into_isize(self) -> isize;
 }
 
-macro_rules! cell_value_impl_u {
+/// A value that may be debugged in a brainfuck `Runner`'s input or output.
+pub trait DebuggableCellValue: CellValue {
+    /// Converts this cell value into a valid Unicode character.
+    fn into_char(self) -> char;
+}
+
+macro_rules! direct_cell_value_impl {
     ($($x:ty)+) => {
-        $(impl CellValue for $x {
-            const ZERO: Self = 0;
-
-            fn inc(self) -> Self {
-                self + 1
+        $(
+            impl CellValue for $x {
+                const ZERO: Self = 0;
+                fn inc(self) -> Self { self + 1 }
+                fn dec(self) -> Self { self - 1 }
+                fn into_isize(self) -> isize { self.try_into().unwrap() }
             }
 
-            fn dec(self) -> Self {
-                self - 1
+            impl DebuggableCellValue for $x {
+                fn into_char(self) -> char { self.into() }
             }
 
-            fn into_isize(self) -> isize {
-                self.try_into().unwrap()
-            }
-        })+
-
-        $(impl CellValue for Wrapping<$x> {
-            const ZERO: Self = Wrapping(0);
-
-            fn inc(self) -> Self {
-                self + Wrapping(1)
+            impl CellValue for Wrapping<$x> {
+                const ZERO: Self = Wrapping(0);
+                fn inc(self) -> Self { self + Wrapping(1) }
+                fn dec(self) -> Self { self - Wrapping(1) }
+                fn into_isize(self) -> isize { self.0.try_into().unwrap() }
             }
 
-            fn dec(self) -> Self {
-                self - Wrapping(1)
+            impl DebuggableCellValue for Wrapping<$x> {
+                fn into_char(self) -> char { self.0.into() }
             }
-
-            fn into_isize(self) -> isize {
-                self.0.try_into().unwrap()
-            }
-        })+
-
-        $(impl CellValue for Saturating<$x> {
-            const ZERO: Self = Saturating(0);
-
-            fn inc(self) -> Self {
-                self + Saturating(1)
-            }
-
-            fn dec(self) -> Self {
-                self - Saturating(1)
-            }
-
-            fn into_isize(self) -> isize {
-                self.0.try_into().unwrap()
-            }
-        })+
+        )+
     };
 }
 
-macro_rules! cell_value_impl_i {
+macro_rules! cell_value_impl {
     ($($x:ty)+) => {
-        $(impl CellValue for $x {
-            const ZERO: Self = 0;
-
-            fn inc(self) -> Self {
-                self + 1
+        $(
+            impl CellValue for $x {
+                const ZERO: Self = 0;
+                fn inc(self) -> Self { self + 1 }
+                fn dec(self) -> Self { self - 1 }
+                fn into_isize(self) -> isize { self.try_into().unwrap() }
             }
 
-            fn dec(self) -> Self {
-                self - 1
+            impl DebuggableCellValue for $x {
+                fn into_char(self) -> char { u32::try_from(self).unwrap().try_into().unwrap() }
             }
 
-            fn into_isize(self) -> isize {
-                self.try_into().unwrap()
-            }
-        })+
-
-        $(impl CellValue for Wrapping<$x> {
-            const ZERO: Self = Wrapping(0);
-
-            fn inc(self) -> Self {
-                self + Wrapping(1)
+            impl CellValue for Wrapping<$x> {
+                const ZERO: Self = Wrapping(0);
+                fn inc(self) -> Self { self + Wrapping(1) }
+                fn dec(self) -> Self { self - Wrapping(1) }
+                fn into_isize(self) -> isize { self.0.try_into().unwrap() }
             }
 
-            fn dec(self) -> Self {
-                self - Wrapping(1)
+            impl DebuggableCellValue for Wrapping<$x> {
+                fn into_char(self) -> char { u32::try_from(self.0).unwrap().try_into().unwrap() }
             }
-
-            fn into_isize(self) -> isize {
-                self.0.try_into().unwrap()
-            }
-        })+
-
-        $(impl CellValue for Saturating<$x> {
-            const ZERO: Self = Saturating(0);
-
-            fn inc(self) -> Self {
-                self + Saturating(1)
-            }
-
-            fn dec(self) -> Self {
-                self - Saturating(1)
-            }
-
-            fn into_isize(self) -> isize {
-                self.0.try_into().unwrap()
-            }
-        })+
+        )+
     };
 }
 
-cell_value_impl_u! { u8 u16 u32 u64 u128 usize }
-cell_value_impl_i! { i8 i16 i32 i64 i128 isize }
+direct_cell_value_impl! { u8 }
+cell_value_impl! { i8 u16 i16 u32 i32 u64 i64 u128 i128 usize isize }

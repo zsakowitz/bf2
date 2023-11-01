@@ -1,6 +1,9 @@
 //! Defines a compiler for brainfuck programs.
 
-use crate::{builder::types::CellValue, runner::Runner};
+use crate::{
+    builder::types::CellValue,
+    runner::{output::RunnerOutput, Runner},
+};
 
 #[derive(Debug)]
 enum Instruction {
@@ -61,8 +64,14 @@ impl Program {
     }
 
     /// Runs this program on a given runner.
-    pub fn run_on<const N: usize, T: CellValue>(&self, runner: &mut Runner<N, T>) {
-        fn run<const N: usize, T: CellValue>(list: &Vec<Instruction>, runner: &mut Runner<N, T>) {
+    pub fn run_on<const N: usize, I: Iterator<Item = T>, O: RunnerOutput<T>, T: CellValue>(
+        &self,
+        runner: &mut Runner<N, I, O, T>,
+    ) {
+        fn run<const N: usize, I: Iterator<Item = T>, O: RunnerOutput<T>, T: CellValue>(
+            list: &Vec<Instruction>,
+            runner: &mut Runner<N, I, O, T>,
+        ) {
             for instruction in list {
                 match instruction {
                     Instruction::Inc => runner.inc(),
@@ -80,8 +89,12 @@ impl Program {
     }
 
     /// Runs this program on a new runner.
-    pub fn run<const N: usize, T: CellValue>(&self, input: &[T]) -> Runner<N, T> {
-        let mut runner = Runner::new(input);
+    pub fn run<const N: usize, I: Iterator<Item = T>, O: RunnerOutput<T>, T: CellValue>(
+        &self,
+        input: I,
+        output: O,
+    ) -> Runner<N, I, O, T> {
+        let mut runner = Runner::new(input, output);
         self.run_on(&mut runner);
         runner
     }

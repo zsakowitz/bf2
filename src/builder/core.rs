@@ -1,12 +1,16 @@
 //! The core implementation details of the brainfuck allocator.
 
 use super::{string::CellString, types::CellValue};
-use crate::{program::Program, runner::Runner};
+use crate::{
+    program::Program,
+    runner::{output::RunnerOutput, Runner},
+};
 use std::{
     cell::RefCell,
     fmt,
+    io::{stdin, stdout, Read, Stdout},
     marker::PhantomData,
-    ops::{AddAssign, SubAssign},
+    ops::{self, AddAssign, DivAssign, SubAssign},
 };
 
 /// An allocating builder for brainfuck programs.
@@ -39,9 +43,41 @@ impl<const N: usize, T: CellValue> Builder<N, T> {
         Program::new(self.source.borrow().as_str())
     }
 
-    /// Compiles this builder and runs it on a given input string.
-    pub fn run(&self, input: &[T]) -> Result<Runner<N, T>, &'static str> {
-        Ok(self.compile()?.run(input))
+    /// Compiles this builder and runs it on a given input.
+    pub fn run<I: Iterator<Item = T>, O: RunnerOutput<T>>(
+        &self,
+        input: I,
+        output: O,
+    ) -> Result<Runner<N, I, O, T>, &'static str> {
+        Ok(self.compile()?.run(input, output))
+    }
+
+    /// Compiles this builder and runs it, using stdin and stdout as input and output respectively.
+    pub fn run_interactive<I: FnMut(u8) -> T, O: FnMut(T) -> u8>(
+        &self,
+        input_adapter: I,
+        output_adapter: O,
+    ) -> Result<Runner<N, impl Iterator<Item = T>, impl RunnerOutput<T>, T>, &'static str> {
+        struct Output<T, O: FnMut(T) -> u8> {
+            stdout: Stdout,
+            adapter: O,
+            _phantom: PhantomData<T>,
+        }
+
+        impl<T, O: FnMut(T) -> u8> RunnerOutput<T> for Output<T, O> {
+            fn write(&mut self, value: T) {
+                self.stdout.write((self.adapter)(value));
+            }
+        }
+
+        Ok(self.compile()?.run(
+            stdin().bytes().map(|x| x.unwrap()).map(input_adapter),
+            Output {
+                stdout: stdout(),
+                adapter: output_adapter,
+                _phantom: PhantomData,
+            },
+        ))
     }
 
     /// Creates an array of cells guaranteed to be consecutive in memory.
@@ -142,9 +178,21 @@ impl<const N: usize, T: CellValue> Builder<N, T> {
         }
     }
 
-    /// Creates a new cell containing the next byte of input.
+    /// Creates a new `CellString` with a specific value and writes it.
+    pub fn write<'a>(&'a self, source: &str)
+    where
+        T: PartialOrd + ops::Sub,
+        u8: Into<T>,
+        Cell<'a, N, T>: AddAssign<<T as ops::Sub>::Output>,
+        Cell<'a, N, T>: SubAssign<<T as ops::Sub>::Output>,
+    {
+        self.str(source).write();
+    }
+
+    /// Creates a new cell containing the next byte of input, or `T::ZERO` if there is no input
+    /// left.
     pub fn read(&self) -> Cell<N, T> {
-        let mut cell = unsafe { self.cell_uninit() };
+        let mut cell = self.cell(T::ZERO);
         cell.read();
         cell
     }
@@ -203,6 +251,7 @@ impl<const N: usize, T: CellValue> fmt::Debug for Builder<N, T> {
 }
 
 /// An allocated cell.
+#[must_use]
 pub struct Cell<'a, const N: usize, T: CellValue> {
     builder: &'a Builder<N, T>,
     location: usize,
@@ -298,6 +347,52 @@ impl<'a, const N: usize, T: CellValue> Cell<'a, N, T> {
         self.zero();
         *self += value;
     }
+
+    /// Swaps the values of two cells.
+    pub fn swap(&mut self, other: &mut Cell<N, T>) {
+        let temp = self.move_and_zero();
+        other.move_into_and_zero(self);
+        temp.move_into(other);
+    }
+
+    /// Turns this cell into several new cells that are copies of the original, and destroys the
+    /// original. If you need to keep the original cell intact after copying, use `.copy()` instead.
+    pub fn into_copies<const U: usize>(mut self) -> [Cell<'a, N, T>; U] {
+        let mut cells = [(); U].map(|_| self.builder.cell(T::ZERO));
+
+        self.while_nonzero_mut(|this| {
+            this.dec();
+            cells.iter_mut().for_each(|cell| cell.inc());
+        });
+
+        cells
+    }
+
+    /// Turns this cell into several new cells that are copies of the original. Prefer
+    /// `.into_copies()` when possible, as it generates much shorter code by not needing a temporary
+    /// cell.
+    pub fn copy<const U: usize>(&self) -> [Cell<'a, N, T>; U] {
+        let mut cells = [(); U].map(|_| self.builder.cell(T::ZERO));
+        let mut temp = self.builder.cell(T::ZERO);
+
+        // This is a handwritten implementation. We take a non-mutable reference, but `self` needs
+        // to be mutated, even if it doesn't stay that way.
+
+        self.goto();
+        *self.builder.source.borrow_mut() += "[-";
+        cells.iter_mut().for_each(|cell| cell.inc());
+        temp.inc();
+        self.goto();
+        *self.builder.source.borrow_mut() += "]";
+        temp.goto();
+        *self.builder.source.borrow_mut() += "[-";
+        self.goto();
+        *self.builder.source.borrow_mut() += "+";
+        temp.goto();
+        *self.builder.source.borrow_mut() += "]";
+
+        cells
+    }
 }
 
 impl<'a, const N: usize, T: CellValue> Drop for Cell<'a, N, T> {
@@ -365,32 +460,15 @@ impl<'a, const N: usize, T: CellValue> SubAssign<T> for Cell<'a, N, T> {
 // reference, but the underlying data is actually mutated during the process.
 impl<'a, const N: usize, T: CellValue> Clone for Cell<'a, N, T> {
     fn clone(&self) -> Self {
-        let temp = self.builder.cell(T::ZERO);
-        let output = self.builder.cell(T::ZERO);
-        let source = &self.builder.source;
-
-        self.goto();
-        *source.borrow_mut() += "[";
-        temp.goto();
-        *source.borrow_mut() += "+";
-        self.goto();
-        *source.borrow_mut() += "-]";
-
-        temp.goto();
-        *source.borrow_mut() += "[";
-        self.goto();
-        *source.borrow_mut() += "+";
-        output.goto();
-        *source.borrow_mut() += "+";
-        temp.goto();
-        *source.borrow_mut() += "-]";
-
-        output
+        let [copy] = self.copy();
+        copy
     }
 
     fn clone_from(&mut self, other: &Self) {
         let temp = self.builder.cell(T::ZERO);
         let source = &self.builder.source;
+
+        self.zero();
 
         other.goto();
         *source.borrow_mut() += "[";
@@ -410,7 +488,6 @@ impl<'a, const N: usize, T: CellValue> Clone for Cell<'a, N, T> {
     }
 }
 
-// This is implemented in `core` to avoid unnecessary clones.
 impl<'a, const N: usize, T: CellValue> AddAssign<&Cell<'a, N, T>> for Cell<'a, N, T> {
     fn add_assign(&mut self, rhs: &Cell<'a, N, T>) {
         let temp = rhs.builder.cell(T::ZERO);
@@ -434,7 +511,6 @@ impl<'a, const N: usize, T: CellValue> AddAssign<&Cell<'a, N, T>> for Cell<'a, N
     }
 }
 
-// This is implemented in `core` to avoid unnecessary clones.
 impl<'a, const N: usize, T: CellValue> SubAssign<&Cell<'a, N, T>> for Cell<'a, N, T> {
     fn sub_assign(&mut self, rhs: &Cell<'a, N, T>) {
         let temp = rhs.builder.cell(T::ZERO);
@@ -455,5 +531,60 @@ impl<'a, const N: usize, T: CellValue> SubAssign<&Cell<'a, N, T>> for Cell<'a, N
         *source.borrow_mut() += "-";
         temp.goto();
         *source.borrow_mut() += "-]";
+    }
+}
+
+impl<'a, const N: usize, T: CellValue> DivAssign<&Cell<'a, N, T>> for Cell<'a, N, T> {
+    fn div_assign(&mut self, rhs: &Cell<'a, N, T>) {
+        let mut temp0 = self.builder.cell(T::ZERO);
+        let mut temp1 = self.builder.cell(T::ZERO);
+        let mut temp2 = self.builder.cell(T::ZERO);
+        let mut temp3 = self.builder.cell(T::ZERO);
+        self.move_into_and_zero(&mut temp0);
+
+        temp0.while_nonzero_mut(|mut temp0| {
+            // Implemented manually because we take a non-mutable reference to `rhs`.
+            rhs.goto();
+            *self.builder.source.borrow_mut() += "[-";
+            temp1.inc();
+            temp2.inc();
+            rhs.goto();
+            *self.builder.source.borrow_mut() += "]";
+
+            temp2.while_nonzero_mut(|temp2| {
+                temp2.dec();
+                rhs.goto();
+                *self.builder.source.borrow_mut() += "+";
+            });
+
+            temp1.while_nonzero_mut(|temp1| {
+                temp2.inc();
+                temp0.dec();
+
+                temp0.while_nonzero_mut(|temp0| {
+                    temp2.zero();
+                    temp3.inc();
+                    temp0.dec();
+                });
+
+                temp3.add_into_all_and_zero([&mut temp0]);
+
+                temp2.while_nonzero_mut(|temp2| {
+                    temp1.dec();
+
+                    temp1.while_nonzero_mut(|temp1| {
+                        self.dec();
+                        temp1.zero();
+                    });
+
+                    temp1.inc();
+                    temp2.dec();
+                });
+
+                temp1.dec();
+            });
+
+            self.inc();
+        });
     }
 }

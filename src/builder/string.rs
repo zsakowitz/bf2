@@ -9,6 +9,7 @@ use std::{
     ops::{AddAssign, Sub, SubAssign},
 };
 
+#[must_use]
 /// A cell containing a string. The string is not stored in the memory of the brainfuck program
 /// until it is instantiated. Until then, it may be manipulated by other methods.
 pub struct CellString<'a, 'b, const N: usize, T: CellValue> {

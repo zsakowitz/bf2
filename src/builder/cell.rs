@@ -4,25 +4,31 @@ use super::{core::Cell, types::CellValue};
 use std::ops;
 
 impl<'a, const N: usize, T: CellValue> Cell<'a, N, T> {
-    /// Moves the contents of this cell into a new cell, zeroing this cell in the process. Returns
-    /// the new cell.
-    pub fn move_and_zero(&mut self) -> Self {
-        let mut output = self.builder().cell(T::ZERO);
-
+    /// Adds the contents of this cell into several others, zeroing this cell in the process.
+    pub fn add_into_all_and_zero<const U: usize>(&mut self, mut others: [&mut Cell<N, T>; U]) {
         self.while_nonzero_mut(|this| {
             this.dec();
-            output.inc();
+            others.iter_mut().for_each(|cell| cell.inc());
         });
+    }
 
+    /// Moves the contents of this cell into a new cell, zeroing this cell in the process. Returns
+    /// the new cell.
+    pub fn move_and_zero(&mut self) -> Cell<'a, N, T> {
+        let mut output = self.builder().cell(T::ZERO);
+        self.add_into_all_and_zero([&mut output]);
         output
+    }
+
+    /// Moves the contents of this cell into another cell, zeroing this cell afterwards.
+    pub fn move_into_and_zero(&mut self, output: &mut Cell<N, T>) {
+        output.zero();
+        self.add_into_all_and_zero([output]);
     }
 
     /// Moves the contents of this cell into another cell, dropping this cell afterwards.
     pub fn move_into(mut self, output: &mut Cell<N, T>) {
-        self.while_nonzero_mut(|this| {
-            this.dec();
-            output.inc();
-        });
+        self.move_into_and_zero(output);
     }
 }
 
